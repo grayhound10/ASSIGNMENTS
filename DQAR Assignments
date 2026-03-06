@@ -1,0 +1,157 @@
+  WITH LATESTBATCH AS (
+        SELECT 
+              'HR' AS DOMAIN_NAME,
+               MAX(BATCH_SEQ) AS MAX_BATCH_SEQ
+        FROM DQ_CONTROL
+        WHERE DOMAIN_NAME = 'HR'    -- latest HR batch number
+    ),
+    
+    -- Pre-aggregate invalid counts by control-row (rule) and by table/field
+    RULE_INVALIDS AS (
+        SELECT
+            CTRL_SEQ,
+            COUNT(*) AS INVALID_COUNT   -- number of invalid rows for this rule
+        FROM DQ_CLEANSE_RESULTS
+        WHERE DOMAIN_NAME = 'HR' 
+              AND BATCH_SEQ = (SELECT MAX_BATCH_SEQ FROM LATESTBATCH)
+        GROUP BY CTRL_SEQ
+    ),
+    
+    TABLE_INVALIDS AS (
+        SELECT
+            DCR.TABLE_NAME,
+            COUNT(DISTINCT DCR.TABROWID) AS INVALID_COUNT   -- distinct invalid rows per table
+        FROM DQ_CLEANSE_RESULTS DCR
+        JOIN LATESTBATCH LB ON DCR.DOMAIN_NAME = LB.DOMAIN_NAME
+                            AND DCR.BATCH_SEQ = LB.MAX_BATCH_SEQ
+        GROUP BY DCR.TABLE_NAME
+    ),
+    
+    FIELD_INVALIDS AS (
+        SELECT
+            DCR.TABLE_NAME,
+            SUBSTR(DCR.FIELD_NAME,4) AS FIELD_NAME, 
+            COUNT(DISTINCT DCR.TABROWID) AS INVALID_COUNT
+        FROM DQ_CLEANSE_RESULTS DCR
+        JOIN LATESTBATCH LB ON DCR.DOMAIN_NAME = LB.DOMAIN_NAME
+                            AND DCR.BATCH_SEQ = LB.MAX_BATCH_SEQ
+        GROUP BY DCR.TABLE_NAME, SUBSTR(DCR.FIELD_NAME,4)
+    ),
+    
+    TOTAL_RECS_BY_TABLE AS (
+        SELECT
+            DC.DOMAIN_NAME,
+            DC.SUB_DOMAIN_NAME,
+            DC.PROCESSTABLENAME AS TABLE_NAME,
+            MAX(DC.ROWCOUNT) AS TOTAL_RECS
+        FROM DQ_CONTROL DC
+        JOIN LATESTBATCH LB ON DC.DOMAIN_NAME = LB.DOMAIN_NAME
+                            AND DC.BATCH_SEQ = LB.MAX_BATCH_SEQ
+        WHERE DC.PROCEDURE_NAME IN ('DQ_PROCESSRULES','DQ_POPULATEVIEW')
+        AND DC.DOMAIN_NAME = 'HR'
+        GROUP BY DC.DOMAIN_NAME, DC.SUB_DOMAIN_NAME, DC.PROCESSTABLENAME
+    )
+    
+    SELECT
+        D.DOMAIN_NAME,
+        D.SUB_DOMAIN_NAME,
+        D.TABLE_NAME,
+        D.FIELD_NAME,
+        D.RULE_CATEGORY,
+        D.PROCEDURE_NAME,
+        D.RULE_DESC,
+        D.TOTAL_RECS,
+        (D.TOTAL_RECS - D.INVALID_COUNT) AS VALID_COUNT,
+        D.INVALID_COUNT,
+        CASE WHEN D.INVALID_COUNT = 0 THEN 100
+             ELSE ROUND((1 - (D.INVALID_COUNT / NULLIF(D.TOTAL_RECS,0))) * 100, 3)
+        END AS VALID_PERC,
+        CASE WHEN D.INVALID_COUNT = 0 THEN 0
+             ELSE ROUND((1 - ((D.TOTAL_RECS - D.INVALID_COUNT) / NULLIF(D.TOTAL_RECS,0))) * 100, 3)
+        END AS INVALID_PERC
+    FROM (
+        -- 1) RULE-LEVEL details (DSP='C')
+        SELECT
+            DC.DOMAIN_NAME,
+            DC.SUB_DOMAIN_NAME,
+            DC.PROCESSTABLENAME AS TABLE_NAME,
+            DC.PROCESSFIELDNAME AS FIELD_NAME,
+            DR.RULE_CATEGORY,
+            DC.PROCEDURE_NAME,
+            CASE WHEN DC.PROCEDURE_NAME = 'DQ_LENGTH'
+                 THEN DR.RULE_DESC || ' ' || SUBSTR(DR.WHERECLAUSE,1,10)
+                 ELSE DR.RULE_DESC END AS RULE_DESC,
+            TRB.TOTAL_RECS,
+            NVL(RI.INVALID_COUNT, 0) AS INVALID_COUNT
+        FROM DQ_CONTROL DC
+        JOIN LATESTBATCH LB ON DC.DOMAIN_NAME = LB.DOMAIN_NAME
+                            AND DC.BATCH_SEQ = LB.MAX_BATCH_SEQ
+        JOIN DQ_RULES DR    ON DR.DQRULE_SEQ = DC.DQRULE_SEQ
+                            AND DR.DOMAIN_NAME = DC.DOMAIN_NAME
+                            AND DR.SUB_DOMAIN_NAME = DC.SUB_DOMAIN_NAME
+        LEFT JOIN RULE_INVALIDS RI ON RI.CTRL_SEQ = DC.CTRL_SEQ
+        JOIN DQ_CONTROL DC_MASTER ON DC_MASTER.CTRL_SEQ = DC.MASTER_CTRL_SEQ  -- get master row for rowcount
+                                  AND DC_MASTER.DOMAIN_NAME = DC.DOMAIN_NAME
+                                  AND DC_MASTER.SUB_DOMAIN_NAME = DC.SUB_DOMAIN_NAME
+        JOIN TOTAL_RECS_BY_TABLE TRB ON TRB.DOMAIN_NAME = DC.DOMAIN_NAME
+                                     AND TRB.SUB_DOMAIN_NAME = DC.SUB_DOMAIN_NAME
+                                     AND TRB.TABLE_NAME = DC.PROCESSTABLENAME
+        WHERE DC.RULE_CATEGORY IN ('DETECT','CLEANSE') AND DC.DOMAIN_NAME = 'HR'
+        /*These rows list each individual rule's results. DSP='C'. */
+        
+        UNION ALL
+        
+        -- 2) TABLE-LEVEL totals (DSP='A')
+        SELECT
+            DC.DOMAIN_NAME,
+            DC.SUB_DOMAIN_NAME,
+            DC.PROCESSTABLENAME AS TABLE_NAME,
+            DC.PROCESSFIELDNAME AS FIELD_NAME,
+            '** T O T A L ************************' AS RULE_CATEGORY,
+            DC.PROCESSTABLENAME || ': Total Counts and Perc' AS PROCEDURE_NAME,
+            'Based on distinct Row occurrences ie no double counting' AS RULE_DESC,
+            DC.ROWCOUNT AS TOTAL_RECS,
+            NVL(TI.INVALID_COUNT, 0) AS INVALID_COUNT
+        FROM DQ_CONTROL DC
+        JOIN LATESTBATCH LB ON DC.DOMAIN_NAME = LB.DOMAIN_NAME AND DC.BATCH_SEQ = LB.MAX_BATCH_SEQ
+        LEFT JOIN TABLE_INVALIDS TI ON TI.TABLE_NAME = DC.PROCESSTABLENAME
+        WHERE DC.RULE_CATEGORY = 'MASTER' AND DC.DOMAIN_NAME = 'HR'
+        /* One row per table, showing total records and invalid count (distinct). DSP='A'. */
+        
+        UNION ALL
+        
+        -- 3) FIELD-LEVEL totals (DSP='B')
+        SELECT
+            DC.DOMAIN_NAME,
+            DC.SUB_DOMAIN_NAME,
+            DC.PROCESSTABLENAME AS TABLE_NAME,
+            DC.PROCESSFIELDNAME AS FIELD_NAME,
+            '** ' || DC.PROCESSFIELDNAME || ' **' AS RULE_CATEGORY,
+            'FIELD LEVEL Total Counts and Perc' AS PROCEDURE_NAME,
+            'Based on distinct Row occurrences ie no double counting' AS RULE_DESC,
+            TRB.TOTAL_RECS,
+            NVL(FI.INVALID_COUNT, 0) AS INVALID_COUNT
+        FROM (
+            SELECT DISTINCT DOMAIN_NAME, SUB_DOMAIN_NAME, PROCESSTABLENAME, PROCESSFIELDNAME, BATCH_SEQ
+            FROM DQ_CONTROL
+            WHERE DOMAIN_NAME = 'HR'
+              AND BATCH_SEQ = (SELECT MAX_BATCH_SEQ FROM LATESTBATCH)
+              AND RULE_CATEGORY IN ('CLEANSE','DETECT')
+              AND PROCESSFIELDNAME <> 'ALL'
+        ) DC
+        LEFT JOIN TOTAL_RECS_BY_TABLE TRB ON TRB.DOMAIN_NAME = DC.DOMAIN_NAME
+                                          AND TRB.SUB_DOMAIN_NAME = DC.SUB_DOMAIN_NAME
+                                          AND TRB.TABLE_NAME = DC.PROCESSTABLENAME
+        LEFT JOIN FIELD_INVALIDS FI ON FI.TABLE_NAME = DC.PROCESSTABLENAME 
+                                    AND FI.FIELD_NAME = DC.PROCESSFIELDNAME
+        /* One row per field (per table). DSP='B'. */
+    ) D
+    WHERE D.SUB_DOMAIN_NAME = 'ACTIVE_ASS_FY_HISTORY'
+    ORDER BY
+        D.TABLE_NAME,
+        D.FIELD_NAME,
+        CASE WHEN D.RULE_CATEGORY = '** T O T A L ************************' THEN 1
+             WHEN D.RULE_CATEGORY LIKE '** % **' THEN 2
+             ELSE 3 END,
+        D.TABLE_NAME, 
+        D.FIELD_NAME
