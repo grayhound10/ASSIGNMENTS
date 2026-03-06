@@ -1,0 +1,183 @@
+WITH LATESTBATCH AS (
+    SELECT
+        'HR' AS DOMAIN_NAME,
+        MAX(BATCH_SEQ) AS MAX_BATCH_SEQ
+    FROM DQ_CONTROL
+    WHERE DOMAIN_NAME = 'HR'
+),
+
+-- Bridge: map every physical assignment row (TABROWID) to its assignment category
+ASS_CATEGORY_MAP AS (
+    SELECT DISTINCT
+        PAA.TABROWID,
+        AL.ASSIGNMENT_CATEGORY
+    FROM DQ_PER_ALL_ASSIGNMENTS_F_v PAA
+    JOIN DQ_ASSIGNMENT_LOOKUP_V AL ON AL.ASSIGNMENT_ID = PAA.ASSIGNMENT_ID
+),
+
+-- Distinct categories - used to cross-join rules so zero-invalid rules still appear per category
+CATEGORIES AS (
+    SELECT DISTINCT ASSIGNMENT_CATEGORY
+    FROM DQ_ASSIGNMENT_LOOKUP_V
+),
+
+-- Total assignments per category - denominator for valid/invalid percentages
+TOTAL_RECS_BY_CATEGORY AS (
+    SELECT
+        ASSIGNMENT_CATEGORY,
+        COUNT(DISTINCT ASSIGNMENT_ID) AS TOTAL_RECS
+    FROM DQ_ASSIGNMENT_LOOKUP_V
+    GROUP BY ASSIGNMENT_CATEGORY
+),
+
+-- Rule-level invalid counts split by category
+RULE_INVALIDS AS (
+    SELECT
+        AC.ASSIGNMENT_CATEGORY,
+        DCR.CTRL_SEQ,
+        COUNT(*) AS INVALID_COUNT
+    FROM DQ_CLEANSE_RESULTS DCR
+    JOIN ASS_CATEGORY_MAP AC ON AC.TABROWID = DCR.TABROWID
+    WHERE DCR.DOMAIN_NAME = 'HR'
+      AND DCR.BATCH_SEQ = (SELECT MAX_BATCH_SEQ FROM LATESTBATCH)
+    GROUP BY AC.ASSIGNMENT_CATEGORY, DCR.CTRL_SEQ
+),
+
+-- Table-level distinct invalid row counts split by category
+TABLE_INVALIDS AS (
+    SELECT
+        AC.ASSIGNMENT_CATEGORY,
+        DCR.TABLE_NAME,
+        COUNT(DISTINCT DCR.TABROWID) AS INVALID_COUNT
+    FROM DQ_CLEANSE_RESULTS DCR
+    JOIN LATESTBATCH LB ON DCR.DOMAIN_NAME = LB.DOMAIN_NAME
+                       AND DCR.BATCH_SEQ   = LB.MAX_BATCH_SEQ
+    JOIN ASS_CATEGORY_MAP AC ON AC.TABROWID = DCR.TABROWID
+    GROUP BY AC.ASSIGNMENT_CATEGORY, DCR.TABLE_NAME
+),
+
+-- Field-level distinct invalid row counts split by category
+FIELD_INVALIDS AS (
+    SELECT
+        AC.ASSIGNMENT_CATEGORY,
+        DCR.TABLE_NAME,
+        SUBSTR(DCR.FIELD_NAME, 4) AS FIELD_NAME,
+        COUNT(DISTINCT DCR.TABROWID) AS INVALID_COUNT
+    FROM DQ_CLEANSE_RESULTS DCR
+    JOIN LATESTBATCH LB ON DCR.DOMAIN_NAME = LB.DOMAIN_NAME
+                       AND DCR.BATCH_SEQ   = LB.MAX_BATCH_SEQ
+    JOIN ASS_CATEGORY_MAP AC ON AC.TABROWID = DCR.TABROWID
+    GROUP BY AC.ASSIGNMENT_CATEGORY, DCR.TABLE_NAME, SUBSTR(DCR.FIELD_NAME, 4)
+)
+
+SELECT
+    D.ASSIGNMENT_CATEGORY,
+    D.DOMAIN_NAME,
+    D.SUB_DOMAIN_NAME,
+    D.TABLE_NAME,
+    D.FIELD_NAME,
+    D.RULE_CATEGORY,
+    D.PROCEDURE_NAME,
+    D.RULE_DESC,
+    TRC.TOTAL_RECS,
+    (TRC.TOTAL_RECS - D.INVALID_COUNT)                                              AS VALID_COUNT,
+    D.INVALID_COUNT,
+    CASE WHEN D.INVALID_COUNT = 0 THEN 100
+         ELSE ROUND((1 - (D.INVALID_COUNT / NULLIF(TRC.TOTAL_RECS, 0))) * 100, 3)
+    END AS VALID_PERC,
+    CASE WHEN D.INVALID_COUNT = 0 THEN 0
+         ELSE ROUND((D.INVALID_COUNT / NULLIF(TRC.TOTAL_RECS, 0)) * 100, 3)
+    END AS INVALID_PERC
+FROM (
+
+    -- 1) RULE-LEVEL details
+    --    Cross-join categories so every rule appears for each category.
+    --    LEFT JOIN invalids so rules with zero issues still show (INVALID_COUNT = 0).
+    SELECT
+        CAT.ASSIGNMENT_CATEGORY,
+        DC.DOMAIN_NAME,
+        DC.SUB_DOMAIN_NAME,
+        DC.PROCESSTABLENAME                                                          AS TABLE_NAME,
+        DC.PROCESSFIELDNAME                                                          AS FIELD_NAME,
+        DR.RULE_CATEGORY,
+        DC.PROCEDURE_NAME,
+        CASE WHEN DC.PROCEDURE_NAME = 'DQ_LENGTH'
+             THEN DR.RULE_DESC || ' ' || SUBSTR(DR.WHERECLAUSE, 1, 10)
+             ELSE DR.RULE_DESC
+        END                                                                          AS RULE_DESC,
+        NVL(RI.INVALID_COUNT, 0)                                                    AS INVALID_COUNT
+    FROM DQ_CONTROL DC
+    JOIN LATESTBATCH LB  ON DC.DOMAIN_NAME     = LB.DOMAIN_NAME
+                        AND DC.BATCH_SEQ        = LB.MAX_BATCH_SEQ
+    JOIN DQ_RULES DR     ON DR.DQRULE_SEQ       = DC.DQRULE_SEQ
+                        AND DR.DOMAIN_NAME       = DC.DOMAIN_NAME
+                        AND DR.SUB_DOMAIN_NAME   = DC.SUB_DOMAIN_NAME
+    CROSS JOIN CATEGORIES CAT
+    LEFT JOIN RULE_INVALIDS RI ON RI.CTRL_SEQ            = DC.CTRL_SEQ
+                               AND RI.ASSIGNMENT_CATEGORY = CAT.ASSIGNMENT_CATEGORY
+    WHERE DC.RULE_CATEGORY IN ('DETECT', 'CLEANSE')
+      AND DC.DOMAIN_NAME = 'HR'
+
+    UNION ALL
+
+    -- 2) TABLE-LEVEL totals
+    --    One row per table per category.
+    SELECT
+        CAT.ASSIGNMENT_CATEGORY,
+        DC.DOMAIN_NAME,
+        DC.SUB_DOMAIN_NAME,
+        DC.PROCESSTABLENAME                                                          AS TABLE_NAME,
+        DC.PROCESSFIELDNAME                                                          AS FIELD_NAME,
+        '** T O T A L ************************'                                      AS RULE_CATEGORY,
+        DC.PROCESSTABLENAME || ': Total Counts and Perc'                             AS PROCEDURE_NAME,
+        'Based on distinct Row occurrences ie no double counting'                    AS RULE_DESC,
+        NVL(TI.INVALID_COUNT, 0)                                                    AS INVALID_COUNT
+    FROM DQ_CONTROL DC
+    JOIN LATESTBATCH LB ON DC.DOMAIN_NAME = LB.DOMAIN_NAME
+                       AND DC.BATCH_SEQ   = LB.MAX_BATCH_SEQ
+    CROSS JOIN CATEGORIES CAT
+    LEFT JOIN TABLE_INVALIDS TI ON TI.TABLE_NAME          = DC.PROCESSTABLENAME
+                                AND TI.ASSIGNMENT_CATEGORY = CAT.ASSIGNMENT_CATEGORY
+    WHERE DC.RULE_CATEGORY = 'MASTER'
+      AND DC.DOMAIN_NAME   = 'HR'
+
+    UNION ALL
+
+    -- 3) FIELD-LEVEL totals
+    --    One row per field per category.
+    SELECT
+        CAT.ASSIGNMENT_CATEGORY,
+        DC.DOMAIN_NAME,
+        DC.SUB_DOMAIN_NAME,
+        DC.PROCESSTABLENAME                                                          AS TABLE_NAME,
+        DC.PROCESSFIELDNAME                                                          AS FIELD_NAME,
+        '** ' || DC.PROCESSFIELDNAME || ' **'                                        AS RULE_CATEGORY,
+        'FIELD LEVEL Total Counts and Perc'                                          AS PROCEDURE_NAME,
+        'Based on distinct Row occurrences ie no double counting'                    AS RULE_DESC,
+        NVL(FI.INVALID_COUNT, 0)                                                    AS INVALID_COUNT
+    FROM (
+        SELECT DISTINCT DOMAIN_NAME, SUB_DOMAIN_NAME, PROCESSTABLENAME, PROCESSFIELDNAME, BATCH_SEQ
+        FROM DQ_CONTROL
+        WHERE DOMAIN_NAME      = 'HR'
+          AND BATCH_SEQ        = (SELECT MAX_BATCH_SEQ FROM LATESTBATCH)
+          AND RULE_CATEGORY    IN ('CLEANSE', 'DETECT')
+          AND PROCESSFIELDNAME <> 'ALL'
+    ) DC
+    CROSS JOIN CATEGORIES CAT
+    LEFT JOIN FIELD_INVALIDS FI ON FI.TABLE_NAME          = DC.PROCESSTABLENAME
+                                AND FI.FIELD_NAME          = DC.PROCESSFIELDNAME
+                                AND FI.ASSIGNMENT_CATEGORY = CAT.ASSIGNMENT_CATEGORY
+
+) D
+JOIN TOTAL_RECS_BY_CATEGORY TRC ON TRC.ASSIGNMENT_CATEGORY = D.ASSIGNMENT_CATEGORY
+WHERE D.SUB_DOMAIN_NAME = 'ACTIVE_ASS_FY_HISTORY'
+ORDER BY
+    D.ASSIGNMENT_CATEGORY,
+    D.TABLE_NAME,
+    D.FIELD_NAME,
+    CASE WHEN D.RULE_CATEGORY = '** T O T A L ************************' THEN 1
+         WHEN D.RULE_CATEGORY LIKE '** % **'                           THEN 2
+         ELSE 3
+    END,
+    D.TABLE_NAME,
+    D.FIELD_NAME
