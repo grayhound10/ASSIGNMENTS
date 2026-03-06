@@ -21,12 +21,12 @@ CATEGORIES AS (
     FROM DQ_ASSIGNMENT_LOOKUP_V
 ),
 
--- Total assignments per category - denominator for valid/invalid percentages
+-- Total rows (TABROWIDs) per category - matches the effective-dated row grain used for invalid counts
 TOTAL_RECS_BY_CATEGORY AS (
     SELECT
         ASSIGNMENT_CATEGORY,
-        COUNT(DISTINCT ASSIGNMENT_ID) AS TOTAL_RECS
-    FROM DQ_ASSIGNMENT_LOOKUP_V
+        COUNT(DISTINCT TABROWID) AS TOTAL_RECS
+    FROM ASS_CATEGORY_MAP
     GROUP BY ASSIGNMENT_CATEGORY
 ),
 
