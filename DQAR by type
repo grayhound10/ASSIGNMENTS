@@ -15,9 +15,9 @@ ASS_CATEGORY_MAP AS (
         PAA.TABROWID,
         AL.ASSIGNMENT_CATEGORY
     FROM DQ_PER_ALL_ASSIGNMENTS_F_v PAA
-    JOIN DQ_ASSIGNMENT_LOOKUP_V AL ON AL.ASSIGNMENT_ID  = PAA.ASSIGNMENT_ID
-                                  AND AL.SNAPSHOT_DATE  BETWEEN PAA.EFFECTIVE_START_DATE
-                                                            AND PAA.EFFECTIVE_END_DATE
+    JOIN DQ_ASSIGNMENT_LOOKUP_V AL ON AL.ASSIGNMENT_ID        = PAA.ASSIGNMENT_ID
+                                  AND AL.EFFECTIVE_START_DATE  = PAA.EFFECTIVE_START_DATE
+                                  AND AL.EFFECTIVE_END_DATE    = PAA.EFFECTIVE_END_DATE
 ),
 
 -- Distinct categories - used to cross-join rules so zero-invalid rules still appear per category
