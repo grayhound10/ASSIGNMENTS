@@ -1,0 +1,224 @@
+create or replace PROCEDURE DQ_ASS_LOOKUP_POPULATE
+(p_CTRL_SEQ   INT
+ )
+AS
+--=============================
+-- Declare BASE variables
+--=============================
+
+v_ProcedureName     VARCHAR2(250) default 'DQ_ASS_LOOKUP_POPULATE';
+v_TABLE_NAME            VARCHAR2(250);
+v_NEW_TABLE_NAME        VARCHAR2(250);
+v_SOURCE_TABLE_NAME     VARCHAR2(250);
+v_MASTER_CTRL_SEQ       INT;
+v_DQRULE_SEQ            INT;
+v_FIELD_NAME            VARCHAR2(250);
+v_SCHEMA_NAME           VARCHAR2(250);
+v_JOIN                  VARCHAR2(4000);
+v_WHERE                 VARCHAR2(4000);
+v_MIGRATION_TERM_MTHS   INT;
+v_err_msg               VARCHAR2(4000);
+v_sql                   CLOB;
+v_COMPOUND_CLEANSE  VARCHAR2(1);
+v_BATCH_SEQ         DQ_CONTROL.BATCH_SEQ%TYPE;
+v_DOMAIN_NAME       DQ_CONTROL.DOMAIN_NAME%TYPE; 
+
+--=================================
+-- Declare Local variables Here
+--=================================
+v_use_date              date; 
+v_fy_start              date;
+v_rows_inserted         NUMBER;
+v_use_date_lit          VARCHAR2(30);
+v_fy_start_lit          VARCHAR2(30);
+
+-------------------------------------
+BEGIN
+    --
+    -- GET WORKING VARIABLES
+    --
+    DQ_GETRUNDATA   (p_CTRL_SEQ        
+                    ,v_MASTER_CTRL_SEQ 
+                    ,v_DQRULE_SEQ  
+                    ,v_TABLE_NAME
+                    ,v_NEW_TABLE_NAME   
+                    ,v_SOURCE_TABLE_NAME 
+                    ,v_FIELD_NAME
+                    ,v_SCHEMA_NAME
+                    ,v_JOIN             
+                    ,v_where              
+                    ,v_MIGRATION_TERM_MTHS
+                    ,v_COMPOUND_CLEANSE
+                    ,v_BATCH_SEQ
+                    ,v_DOMAIN_NAME
+                    );
+    
+
+
+------------------------------ENTER RULE SPECIFIC CODE IN FORMAT BELOW---------------------------------------------------                    
+begin
+
+    DBMS_OUTPUT.PUT_LINE('===============================');
+    DBMS_OUTPUT.PUT_LINE('Assignment Lookup Population');
+    DBMS_OUTPUT.PUT_LINE('===============================');
+   
+    --=============================
+    -- Date Anchors Setup
+    --============================= 
+     DBMS_OUTPUT.PUT_LINE('Calculating date anchors...');
+     
+     -- Get max date for current dataset
+     EXECUTE IMMEDIATE 'SELECT TRUNC(MAX(last_update_date) + 1) FROM apps.per_all_people_f'  INTO v_use_date;
+
+      IF EXTRACT(MONTH FROM v_use_date) >= 4 THEN
+        -- On or after April: fiscal year starts 01-Apr of the same year
+        v_fy_start := ADD_MONTHS(TRUNC(v_use_date, 'YYYY'), 3);  -- +3 months to Jan 1 = Apr 1
+      ELSE
+        -- Before April: fiscal year starts 01-Apr of the previous year
+        v_fy_start := ADD_MONTHS(TRUNC(v_use_date, 'YYYY'), -9); -- -9 months from Jan 1 = Apr 1 prev year
+      END IF;
+      
+    v_use_date_lit := 'TO_DATE('''||TO_CHAR(v_use_date, 'DD-MM-RR')||''',''DD-MM-RR'')';
+    v_fy_start_lit := 'TO_DATE('''||TO_CHAR(v_fy_start, 'DD-MM-RR')||''',''DD-MM-RR'')';
+ 
+    
+    DBMS_OUTPUT.PUT_LINE('Snapshot Date: ' || v_use_date_lit);
+    DBMS_OUTPUT.PUT_LINE('FY STart Date: ' || v_fy_start_lit);
+    DBMS_OUTPUT.PUT_LINE('');
+    
+    -- Enable parallel DML
+    v_sql := 'ALTER SESSION ENABLE PARALLEL DML';
+    execute immediate v_sql;
+
+    --=============================
+    -- Part 1: Active workers current assignments
+    --=============================
+    DBMS_OUTPUT.PUT_LINE('Inserting current active assingments...');
+    
+    v_sql := q'[
+    INSERT /*+ APPEND PARALLEL(DQ_ASSIGNMENT_LOOKUP_V,8) */ 
+    into DQ_ASSIGNMENT_LOOKUP_V (PERSON_ID, ASSIGNMENT_CATEGORY,  ASSIGNMENT_ID,SNAPSHOT_DATE,EFFECTIVE_START_DATE, EFFECTIVE_END_DATE, ASSIGNMENT_TYPE,PER_SYSTEM_STATUS, ZD_EDITION_NAME, PAYROLL_NAME)
+    SELECT 
+        tab.person_id,
+        'AW_ACTIVE_ASSIGNMENTS' AS ASSIGNMENT_CATEGORY,
+        tab.assignment_id, ]'  
+        || v_use_date_lit || q'[ as SNAPSHOT_DATE , 
+        tab.effective_start_date,
+        tab.effective_end_date,
+        tab.assignment_type,
+        s.per_system_status,
+        s.zd_edition_name,
+        py.payroll_name
+    FROM   apps.per_all_assignments_f tab
+    JOIN   apps.per_assignment_status_types s ON s.assignment_status_type_id = tab.assignment_status_type_id AND s.per_system_status = 'ACTIVE_ASSIGN' AND s.zd_edition_name = 'SET1'
+    LEFT JOIN apps.pay_all_payrolls_f py ON py.payroll_id = tab.payroll_id
+    WHERE ]' || v_use_date_lit || q'[ BETWEEN tab.effective_start_date AND tab.effective_end_date 
+        AND tab.assignment_type = 'E'
+        AND EXISTS (
+            SELECT 1 FROM DQ_PEOPLE_STATUS_V PS
+            WHERE PS.PERSON_ID = TAB.PERSON_ID
+            AND PS.CATEGORY = 'ACTIVE_WORKERS'
+            )]';
+    
+    dbms_output.put_line(v_sql);
+    DBMS_OUTPUT.PUT_LINE('');
+    EXECUTE IMMEDIATE V_SQL; 
+    V_ROWS_INSERTED := SQL%ROWCOUNT;
+    COMMIT;
+    DBMS_OUTPUT.PUT_LINE('Inserted ' || V_ROWS_INSERTED || ' active assignment records');
+    DBMS_OUTPUT.PUT_LINE('');
+    
+     --=============================
+    -- Part 2: Active Workers Assignment History (Current FY)
+    --=============================
+    DBMS_OUTPUT.PUT_LINE('Inserting assignment history for Currrent FY...');
+    
+    v_sql := q'[
+    INSERT /*+ APPEND PARALLEL(DQ_ASSIGNMENT_LOOKUP_V,8) */ 
+    into DQ_ASSIGNMENT_LOOKUP_V (PERSON_ID, ASSIGNMENT_CATEGORY, ASSIGNMENT_ID, SNAPSHOT_DATE, EFFECTIVE_START_DATE, EFFECTIVE_END_DATE, ASSIGNMENT_TYPE,PER_SYSTEM_STATUS, ZD_EDITION_NAME, PAYROLL_NAME)
+    SELECT 
+        tab.person_id,
+        'AW_ASSIGNMENT_HISTORY' AS ASSIGNMENT_CATEGORY,
+        tab.assignment_id, ]' 
+        || v_fy_start_lit || q'[ as SNAPSHOT_DATE ,  -- Fiscal year starting date as reference
+        tab.effective_start_date,
+        tab.effective_end_date,
+        tab.assignment_type,
+        s.per_system_status,
+        s.zd_edition_name,
+        py.payroll_name
+    FROM   apps.per_all_assignments_f tab
+    JOIN   apps.per_assignment_status_types s ON s.assignment_status_type_id = tab.assignment_status_type_id AND s.zd_edition_name = 'SET1'
+    LEFT JOIN apps.pay_all_payrolls_f py ON py.payroll_id = tab.payroll_id
+    WHERE ]' || v_fy_start_lit || q'[ BETWEEN tab.effective_start_date AND tab.effective_end_date
+        AND TAB.ASSIGNMENT_TYPE = 'E'
+        AND EXISTS (
+            SELECT 1 FROM DQ_PEOPLE_STATUS_V PS
+            WHERE PS.PERSON_ID = TAB.PERSON_ID
+            AND PS.CATEGORY = 'ACTIVE_WORKERS'
+            )
+        --exclude anything that is also current-active on snapshot date
+        AND NOT (]'|| v_use_date_lit || q'[ BETWEEN tab.effective_start_date AND tab.effective_end_date AND S.PER_SYSTEM_STATUS = 'ACTIVE_ASSIGN') ]';
+    
+    
+
+--      AND EXISTS (
+--        SELECT 1
+--        FROM   apps.per_assignment_status_types s2
+--        WHERE  s2.assignment_status_type_id = tab.assignment_status_type_id
+--        AND    s2.per_system_status         = 'ACTIVE_ASSIGN'
+--        AND    s2.zd_edition_name           = 'SET1'
+--
+--      )
+--    )]' ;
+--                
+ 
+    dbms_output.put_line(v_sql);
+    EXECUTE IMMEDIATE V_SQL; 
+    V_ROWS_INSERTED := SQL%ROWCOUNT;
+    COMMIT;
+    DBMS_OUTPUT.PUT_LINE('Inserted ' || V_ROWS_INSERTED || ' active history records');
+    DBMS_OUTPUT.PUT_LINE('');
+
+    -- DISABLE parallel DML 
+    v_sql := 'ALTER SESSION DISABLE PARALLEL DML';
+    execute immediate v_sql;
+    
+end;
+
+------------------------------ENTER RULE SPECIFIC CODE IN FORMAT ABOVE---------------------------------------------------                    
+    --
+    -- Update the Main DQ table to reflect the change just made
+    -- ie. USE DQ_CLEANSE_RESULTS as the control for this
+    --
+    DQ_COMPOUND_UPDATE 
+    (p_CTRL_SEQ            
+    ,v_MASTER_CTRL_SEQ    
+    ,v_DQRULE_SEQ        
+    ,v_NEW_TABLE_NAME     
+    ,v_FIELD_NAME         
+    ,v_COMPOUND_CLEANSE   
+    );
+
+    commit;
+    --
+EXCEPTION
+    WHEN OTHERS THEN
+        v_err_msg := SQLERRM;
+        DQ_INSERTEXCEPTION
+        (p_CTRL_SEQ
+        ,v_MASTER_CTRL_SEQ
+        ,v_DQRULE_SEQ
+        ,v_ProcedureName
+        ,v_err_msg
+        );
+
+        UPDATE DQ_CONTROL 
+        set    PROCEDURE_STATUS = 'FAILED'
+        ,      PROCEDURE_END  = sysdate
+        WHERE  CTRL_SEQ = p_CTRL_SEQ;
+        --
+        commit;
+
+
+END;
