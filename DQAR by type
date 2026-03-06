@@ -6,13 +6,18 @@ WITH LATESTBATCH AS (
     WHERE DOMAIN_NAME = 'HR'
 ),
 
--- Bridge: map every physical assignment row (TABROWID) to its assignment category
+-- Bridge: map each physical assignment row (TABROWID) to exactly one category.
+-- Join on SNAPSHOT_DATE BETWEEN effective dates so only the specific effective-dated
+-- row captured for each category is mapped - prevents the same TABROWID appearing
+-- in multiple categories when the same assignment is in both.
 ASS_CATEGORY_MAP AS (
     SELECT DISTINCT
         PAA.TABROWID,
         AL.ASSIGNMENT_CATEGORY
     FROM DQ_PER_ALL_ASSIGNMENTS_F_v PAA
-    JOIN DQ_ASSIGNMENT_LOOKUP_V AL ON AL.ASSIGNMENT_ID = PAA.ASSIGNMENT_ID
+    JOIN DQ_ASSIGNMENT_LOOKUP_V AL ON AL.ASSIGNMENT_ID  = PAA.ASSIGNMENT_ID
+                                  AND AL.SNAPSHOT_DATE  BETWEEN PAA.EFFECTIVE_START_DATE
+                                                            AND PAA.EFFECTIVE_END_DATE
 ),
 
 -- Distinct categories - used to cross-join rules so zero-invalid rules still appear per category
