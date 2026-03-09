@@ -1,0 +1,237 @@
+CREATE OR REPLACE PROCEDURE setup_environment(p_env IN VARCHAR2) AS
+
+    /*
+     * Nested helper procedure to execute DDL statements dynamically.
+     * DDL (CREATE TABLE, GRANT, CREATE SYNONYM) cannot be run statically
+     * inside PL/SQL, so EXECUTE IMMEDIATE is required.
+     * Errors are caught per-statement and printed so that one failure
+     * does not abort the rest of the setup.
+     */
+    PROCEDURE exec(p_sql IN VARCHAR2) IS
+    BEGIN
+        EXECUTE IMMEDIATE p_sql;
+    EXCEPTION
+        WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE('ERROR on: ' || p_sql);
+            DBMS_OUTPUT.PUT_LINE(SQLERRM);
+    END exec;
+
+BEGIN
+
+    --------------------------------------------------------------------------
+    -- DEVINTEGR8 or UATINTEGR8:
+    -- Create copies of APPS tables inside the INTEGR8APPS schema.
+    -- CTAS (CREATE TABLE AS SELECT) copies both the structure and the data
+    -- from the source APPS table into the integration schema at point-in-time.
+    -- These tables are shared by both DEV and UAT integration environments.
+    --------------------------------------------------------------------------
+    IF p_env IN ('DEVINTEGR8', 'UATINTEGR8') THEN
+
+        -- Accounts Payable: cheque/payment runs
+        exec('CREATE TABLE INTEGR8APPS.AP_CHECKS_ALL               AS SELECT * FROM APPS.AP_CHECKS_ALL');
+        -- Accounts Payable: invoice headers
+        exec('CREATE TABLE INTEGR8APPS.AP_INVOICES_ALL             AS SELECT * FROM APPS.AP_INVOICES_ALL');
+        -- Accounts Payable: invoice line distributions
+        exec('CREATE TABLE INTEGR8APPS.AP_INVOICE_DISTRIBUTIONS_ALL AS SELECT * FROM APPS.AP_INVOICE_DISTRIBUTIONS_ALL');
+        -- Accounts Payable: payments linked to invoices
+        exec('CREATE TABLE INTEGR8APPS.AP_INVOICE_PAYMENTS_ALL     AS SELECT * FROM APPS.AP_INVOICE_PAYMENTS_ALL');
+        -- Accounts Payable: payment due schedules per invoice
+        exec('CREATE TABLE INTEGR8APPS.AP_PAYMENT_SCHEDULES_ALL    AS SELECT * FROM APPS.AP_PAYMENT_SCHEDULES_ALL');
+        -- Accounts Payable: supplier master
+        exec('CREATE TABLE INTEGR8APPS.AP_SUPPLIERS                AS SELECT * FROM APPS.AP_SUPPLIERS');
+        -- Accounts Payable: supplier site details (address, bank etc.)
+        exec('CREATE TABLE INTEGR8APPS.AP_SUPPLIER_SITES           AS SELECT * FROM APPS.AP_SUPPLIER_SITES');
+        -- Accounts Receivable: tax code lookup view
+        exec('CREATE TABLE INTEGR8APPS.AR_AP_TAX_CODES_V           AS SELECT * FROM APPS.AR_AP_TAX_CODES_V');
+        -- Accounts Receivable: invoice payment schedules
+        exec('CREATE TABLE INTEGR8APPS.AR_PAYMENT_SCHEDULES_ALL    AS SELECT * FROM APPS.AR_PAYMENT_SCHEDULES_ALL');
+        -- Trading Community: customer contact records
+        exec('CREATE TABLE INTEGR8APPS.CUSTOMER_CONTACTS           AS SELECT * FROM APPS.CUSTOMER_CONTACTS');
+        -- Custom fuzzy-matching reference table
+        exec('CREATE TABLE INTEGR8APPS.FUZZY_TABLES                AS SELECT * FROM APPS.FUZZY_TABLES');
+        -- Trading Community: contact points (phone, email etc.)
+        exec('CREATE TABLE INTEGR8APPS.HZ_CONTACT_POINTS           AS SELECT * FROM APPS.HZ_CONTACT_POINTS');
+        -- Trading Community: customer credit profile headers
+        exec('CREATE TABLE INTEGR8APPS.HZ_CUSTOMER_PROFILES        AS SELECT * FROM APPS.HZ_CUSTOMER_PROFILES');
+        -- Trading Community: customer accounts
+        exec('CREATE TABLE INTEGR8APPS.HZ_CUST_ACCOUNTS            AS SELECT * FROM APPS.HZ_CUST_ACCOUNTS');
+        -- Trading Community: customer accounts (all operating units)
+        exec('CREATE TABLE INTEGR8APPS.HZ_CUST_ACCOUNTS_ALL        AS SELECT * FROM APPS.HZ_CUST_ACCOUNTS_ALL');
+        -- Trading Community: roles assigned to customer accounts
+        exec('CREATE TABLE INTEGR8APPS.HZ_CUST_ACCOUNT_ROLES       AS SELECT * FROM APPS.HZ_CUST_ACCOUNT_ROLES');
+        -- Trading Community: customer account sites
+        exec('CREATE TABLE INTEGR8APPS.HZ_CUST_ACCT_SITES_ALL      AS SELECT * FROM APPS.HZ_CUST_ACCT_SITES_ALL');
+        -- Trading Community: credit profile class templates
+        exec('CREATE TABLE INTEGR8APPS.HZ_CUST_PROFILE_CLASSES     AS SELECT * FROM APPS.HZ_CUST_PROFILE_CLASSES');
+        -- Trading Community: site uses (bill-to, ship-to etc.)
+        exec('CREATE TABLE INTEGR8APPS.HZ_CUST_SITE_USES_ALL       AS SELECT * FROM APPS.HZ_CUST_SITE_USES_ALL');
+        -- Trading Community: physical address locations
+        exec('CREATE TABLE INTEGR8APPS.HZ_LOCATIONS                AS SELECT * FROM APPS.HZ_LOCATIONS');
+        -- Trading Community: contacts linked to organisations
+        exec('CREATE TABLE INTEGR8APPS.HZ_ORG_CONTACTS             AS SELECT * FROM APPS.HZ_ORG_CONTACTS');
+        -- Trading Community: party master (people and organisations)
+        exec('CREATE TABLE INTEGR8APPS.HZ_PARTIES                  AS SELECT * FROM APPS.HZ_PARTIES');
+        -- Trading Community: party master (all operating units)
+        exec('CREATE TABLE INTEGR8APPS.HZ_PARTIES_ALL              AS SELECT * FROM APPS.HZ_PARTIES_ALL');
+        -- Trading Community: party site links
+        exec('CREATE TABLE INTEGR8APPS.HZ_PARTY_SITES              AS SELECT * FROM APPS.HZ_PARTY_SITES');
+        -- Trading Community: relationships between parties
+        exec('CREATE TABLE INTEGR8APPS.HZ_RELATIONSHIPS            AS SELECT * FROM APPS.HZ_RELATIONSHIPS');
+        -- Trading Community: roles and responsibilities on a party
+        exec('CREATE TABLE INTEGR8APPS.HZ_ROLE_RESPONSIBILITY      AS SELECT * FROM APPS.HZ_ROLE_RESPONSIBILITY');
+        -- Purchasing: cost distributions on PO lines
+        exec('CREATE TABLE INTEGR8APPS.PO_DISTRIBUTIONS_ALL        AS SELECT * FROM APPS.PO_DISTRIBUTIONS_ALL');
+        -- Purchasing: purchase order headers
+        exec('CREATE TABLE INTEGR8APPS.PO_HEADERS_ALL              AS SELECT * FROM APPS.PO_HEADERS_ALL');
+        -- Purchasing: purchase order lines
+        exec('CREATE TABLE INTEGR8APPS.PO_LINES_ALL                AS SELECT * FROM APPS.PO_LINES_ALL');
+        -- Receivables: customer transaction (invoice) headers
+        exec('CREATE TABLE INTEGR8APPS.RA_CUSTOMER_TRX_ALL         AS SELECT * FROM APPS.RA_CUSTOMER_TRX_ALL');
+        -- Receiving: individual shipment lines against PO receipts
+        exec('CREATE TABLE INTEGR8APPS.RCV_SHIPMENT_LINES          AS SELECT * FROM APPS.RCV_SHIPMENT_LINES');
+        -- General: currency master
+        exec('CREATE TABLE INTEGR8APPS.FND_CURRENCIES              AS SELECT * FROM APPS.FND_CURRENCIES');
+        -- iPayment: external payees registered for payment
+        exec('CREATE TABLE INTEGR8APPS.IBY_EXTERNAL_PAYEES_ALL     AS SELECT * FROM APPS.IBY_EXTERNAL_PAYEES_ALL');
+        -- iPayment: instrument (bank account) usage assignments
+        exec('CREATE TABLE INTEGR8APPS.IBY_PMT_INSTR_USES_ALL      AS SELECT * FROM APPS.IBY_PMT_INSTR_USES_ALL');
+        -- iPayment: external bank account details
+        exec('CREATE TABLE INTEGR8APPS.IBY_EXT_BANK_ACCOUNTS       AS SELECT * FROM APPS.IBY_EXT_BANK_ACCOUNTS');
+        -- iPayment: external bank master (view)
+        exec('CREATE TABLE INTEGR8APPS.IBY_EXT_BANKS_V             AS SELECT * FROM APPS.IBY_EXT_BANKS_V');
+        -- iPayment: external bank branch master (view)
+        exec('CREATE TABLE INTEGR8APPS.IBY_EXT_BANK_BRANCHES_V     AS SELECT * FROM APPS.IBY_EXT_BANK_BRANCHES_V');
+        -- Custom: LPS staging data copied into DEVINTEGR8 schema
+        exec('CREATE TABLE DEVINTEGR8.LPS_DATA_CSV                 AS SELECT * FROM INTEGR8APPS.LPS_DATA_CSV');
+        -- Custom: ISO country codes seeded from INTEGR8APPS into UATINTEGR8
+        exec('CREATE TABLE UATINTEGR8.ISO_COUNTRY_CODES            AS SELECT * FROM INTEGR8APPS.ISO_COUNTRY_CODES');
+
+    END IF;
+
+    --------------------------------------------------------------------------
+    -- DEVINTEGR8 only:
+    -- 1. Grant SELECT on every INTEGR8APPS shadow table to the DEVINTEGR8 schema
+    --    so that application code connecting as DEVINTEGR8 can read the data.
+    -- 2. Grant SELECT on two APPS flex-value tables directly to DEVINTEGR8
+    --    (these were not copied via CTAS, so direct access to APPS is needed).
+    -- 3. Create private synonyms in the DEVINTEGR8 schema so that application
+    --    code can reference the short table name (e.g. FND_CURRENCIES) without
+    --    qualifying it with the INTEGR8APPS schema prefix.
+    --    Note: creating synonyms in another schema requires CREATE ANY SYNONYM.
+    --------------------------------------------------------------------------
+    IF p_env = 'DEVINTEGR8' THEN
+
+        -- Grant access to the AP shadow tables
+        exec('GRANT SELECT ON INTEGR8APPS.AP_CHECKS_ALL               TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.AP_INVOICES_ALL             TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.AP_INVOICE_DISTRIBUTIONS_ALL TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.AP_INVOICE_PAYMENTS_ALL     TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.AP_PAYMENT_SCHEDULES_ALL    TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.AP_SUPPLIERS                TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.AP_SUPPLIER_SITES           TO DEVINTEGR8');
+        -- Grant access to the AR shadow tables
+        exec('GRANT SELECT ON INTEGR8APPS.AR_AP_TAX_CODES_V           TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.AR_PAYMENT_SCHEDULES_ALL    TO DEVINTEGR8');
+        -- Grant access to the customer / Trading Community shadow tables
+        exec('GRANT SELECT ON INTEGR8APPS.CUSTOMER_CONTACTS           TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.FUZZY_TABLES                TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_CONTACT_POINTS           TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_CUSTOMER_PROFILES        TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_CUST_ACCOUNTS            TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_CUST_ACCOUNTS_ALL        TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_CUST_ACCOUNT_ROLES       TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_CUST_ACCT_SITES_ALL      TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_CUST_PROFILE_CLASSES     TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_CUST_SITE_USES_ALL       TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_LOCATIONS                TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_ORG_CONTACTS             TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_PARTIES                  TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_PARTIES_ALL              TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_PARTY_SITES              TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_RELATIONSHIPS            TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.HZ_ROLE_RESPONSIBILITY      TO DEVINTEGR8');
+        -- Grant access to the Purchasing shadow tables
+        exec('GRANT SELECT ON INTEGR8APPS.PO_DISTRIBUTIONS_ALL        TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.PO_HEADERS_ALL              TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.PO_LINES_ALL                TO DEVINTEGR8');
+        -- Grant access to the Receivables and Receiving shadow tables
+        exec('GRANT SELECT ON INTEGR8APPS.RA_CUSTOMER_TRX_ALL         TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.RCV_SHIPMENT_LINES          TO DEVINTEGR8');
+        -- Grant access to the supplier address custom table
+        exec('GRANT SELECT ON INTEGR8APPS.SUPL_SITE_ADDRESS_LPS       TO DEVINTEGR8');
+        -- Grant access to the iPayment and currency shadow tables
+        exec('GRANT SELECT ON INTEGR8APPS.FND_CURRENCIES              TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.IBY_EXTERNAL_PAYEES_ALL     TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.IBY_PMT_INSTR_USES_ALL      TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.IBY_EXT_BANK_ACCOUNTS       TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.IBY_EXT_BANKS_V             TO DEVINTEGR8');
+        exec('GRANT SELECT ON INTEGR8APPS.IBY_EXT_BANK_BRANCHES_V     TO DEVINTEGR8');
+
+        -- Direct grants on APPS flex-value tables (not shadowed in INTEGR8APPS)
+        exec('GRANT SELECT ON APPS.FND_FLEX_VALUES     TO DEVINTEGR8');
+        exec('GRANT SELECT ON APPS.FND_FLEX_VALUE_SETS TO DEVINTEGR8');
+
+        -- Create synonyms inside DEVINTEGR8 so its code can use unqualified names.
+        -- CREATE OR REPLACE avoids errors if the synonym already exists.
+        exec('CREATE OR REPLACE SYNONYM DEVINTEGR8.FND_CURRENCIES          FOR INTEGR8APPS.FND_CURRENCIES');
+        exec('CREATE OR REPLACE SYNONYM DEVINTEGR8.IBY_EXTERNAL_PAYEES_ALL FOR INTEGR8APPS.IBY_EXTERNAL_PAYEES_ALL');
+        exec('CREATE OR REPLACE SYNONYM DEVINTEGR8.IBY_PMT_INSTR_USES_ALL  FOR INTEGR8APPS.IBY_PMT_INSTR_USES_ALL');
+        exec('CREATE OR REPLACE SYNONYM DEVINTEGR8.IBY_EXT_BANK_ACCOUNTS   FOR INTEGR8APPS.IBY_EXT_BANK_ACCOUNTS');
+        exec('CREATE OR REPLACE SYNONYM DEVINTEGR8.IBY_EXT_BANKS_V         FOR INTEGR8APPS.IBY_EXT_BANKS_V');
+        exec('CREATE OR REPLACE SYNONYM DEVINTEGR8.IBY_EXT_BANK_BRANCHES_V FOR INTEGR8APPS.IBY_EXT_BANK_BRANCHES_V');
+
+    END IF;
+
+    --------------------------------------------------------------------------
+    -- UATINTEGR8 only:
+    -- 1. Update DQ_RUNBATCH so the Finance process looks at INTEGR8APPS rather
+    --    than APPS for its source schema — required because UAT runs against the
+    --    shadow tables, not the live APPS schema.
+    -- 2. Create the same set of synonyms in the UATINTEGR8 schema so its
+    --    application code can also use unqualified table names.
+    --------------------------------------------------------------------------
+    IF p_env = 'UATINTEGR8' THEN
+
+        -- Redirect the Finance batch process to the INTEGR8APPS shadow schema
+        UPDATE UATINTEGR8.DQ_RUNBATCH
+           SET schema_name = 'INTEGR8APPS'
+         WHERE schema_name = 'APPS'
+           AND processname  = 'FINANCE';
+        COMMIT; -- Commit the DML; DDL below will auto-commit anyway
+
+        -- Create synonyms inside UATINTEGR8 matching those created for DEVINTEGR8
+        exec('CREATE OR REPLACE SYNONYM UATINTEGR8.FND_CURRENCIES          FOR INTEGR8APPS.FND_CURRENCIES');
+        exec('CREATE OR REPLACE SYNONYM UATINTEGR8.IBY_EXTERNAL_PAYEES_ALL FOR INTEGR8APPS.IBY_EXTERNAL_PAYEES_ALL');
+        exec('CREATE OR REPLACE SYNONYM UATINTEGR8.IBY_PMT_INSTR_USES_ALL  FOR INTEGR8APPS.IBY_PMT_INSTR_USES_ALL');
+        exec('CREATE OR REPLACE SYNONYM UATINTEGR8.IBY_EXT_BANK_ACCOUNTS   FOR INTEGR8APPS.IBY_EXT_BANK_ACCOUNTS');
+        exec('CREATE OR REPLACE SYNONYM UATINTEGR8.IBY_EXT_BANKS_V         FOR INTEGR8APPS.IBY_EXT_BANKS_V');
+        exec('CREATE OR REPLACE SYNONYM UATINTEGR8.IBY_EXT_BANK_BRANCHES_V FOR INTEGR8APPS.IBY_EXT_BANK_BRANCHES_V');
+
+    END IF;
+
+    --------------------------------------------------------------------------
+    -- DEV_HR: placeholder for HR development environment setup.
+    -- Add CREATE TABLE / GRANT / SYNONYM statements here when required.
+    --------------------------------------------------------------------------
+    IF p_env = 'DEV_HR' THEN
+        NULL;
+    END IF;
+
+    --------------------------------------------------------------------------
+    -- UAT_HR: placeholder for HR UAT environment setup.
+    -- Add CREATE TABLE / GRANT / SYNONYM statements here when required.
+    --------------------------------------------------------------------------
+    IF p_env = 'UAT_HR' THEN
+        NULL;
+    END IF;
+
+    DBMS_OUTPUT.PUT_LINE('setup_environment completed for: ' || p_env);
+
+EXCEPTION
+    -- Catch any unhandled error at the procedure level, print it, then re-raise
+    -- so the caller knows the procedure did not complete cleanly.
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('Unhandled error: ' || SQLERRM);
+        RAISE;
+END setup_environment;
+/
