@@ -92,3 +92,7 @@ CREATE SYNONYM iby_ext_bank_branches_v FOR INTEGR8APPS.iby_ext_bank_branches_v;
 update DQ_RUNBATCH set schema_name = 'INTEGR8APPS' where schema_name = 'APPS' and processname = 'FINANCE';
 
 -- Iend if
+
+IF DEV_HR THEN 
+
+IF UAT_HR THEN
